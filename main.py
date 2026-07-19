@@ -149,6 +149,8 @@ def listar_reservas(
     limit: int = Query(20, ge=1, le=100),
     data: Optional[date] = None,
     sala_id: Optional[int] = None,
+    ordernar_por: str = Query("data", description="Campos: data, horario_inicial, id, responsavel"),
+    ordem: str = Query("asc", description="asc ou desc"),
 ):
     conn = get_conn()
     query = "SELECT * FROM reservas WHERE 1=1"
@@ -159,7 +161,11 @@ def listar_reservas(
     if sala_id is not None:
         query += " AND sala_id = ?"
         params.append(sala_id)
-    query += " ORDER BY data, horario_inicial LIMIT ? OFFSET ?"
+        
+    colunas_validas = {"data", "horario_inicial", "id", "responsavel"}
+    coluna = ordenar_por if ordenar_por in colunas_validas else "data"
+    direcao = "DESC" if ordem.lower() == "desc" else "ASC"
+    query += f" ORDER BY {coluna} {direcao} LIMIT ? OFFSET ?"
     params += [limit, skip]
 
     rows = conn.execute(query, params).fetchall()

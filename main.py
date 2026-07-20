@@ -1,11 +1,22 @@
 import sqlite3
+import logging
 from datetime import date, time
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, field_validator
+from fastapi import Header
+
+CHAVE_API = "12345"
 
 DB_FILE = "reserva_salas.db"
+_cache_salas = None
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("reserva_salas")
 
 app = FastAPI(title="Sistema de Reserva de Salas")
 
@@ -43,6 +54,7 @@ def iniciar_banco():
         conn.executemany(
             "INSERT INTO salas (id, nome, capacidade) VALUES (?, ?, ?)",
             [(1, "Sala A", 6), (2, "Sala B", 10), (3, "Sala C", 20)],
+            logger.info("Salas iniciais cadastradas: Sala A, Sala B, Sala C")
         )
     conn.commit()
     conn.close()
@@ -112,16 +124,23 @@ def raiz():
 
 @app.get("/salas")
 def listar_salas():
+    global _cache_salas
+    if _cache_salas is not None:
+        return _cache_salas
+
     conn = get_conn()
     salas = conn.execute("SELECT * FROM salas").fetchall()
     conn.close()
-    return [dict(s) for s in salas]
-
+    _cache_salas = [dict(s) for s in salas]
+    return _cache_salas
 
 # ----- RESERVAS -----
 
 @app.post("/reservas", status_code=201)
-def criar_reserva(reserva: ReservaEntrada):
+def criar_reserva(reserva: ReservaEntrada, x_api_key: str = Header(...)):
+    if x_api_key != CHAVE_API:
+        raise HTTPException(401, "Não autorizado")
+    
     conn = get_conn()
     if not sala_existe(conn, reserva.sala_id):
         conn.close()
@@ -140,6 +159,7 @@ def criar_reserva(reserva: ReservaEntrada):
     conn.commit()
     nova = conn.execute("SELECT * FROM reservas WHERE id = ?", (cursor.lastrowid,)).fetchone()
     conn.close()
+    logger.info("Reserva criada: id=%s sala_id=%s data=%s", nova["id"], nova["sala_id"], nova["data"])
     return reserva_para_dict(nova)
 
 
@@ -149,7 +169,7 @@ def listar_reservas(
     limit: int = Query(20, ge=1, le=100),
     data: Optional[date] = None,
     sala_id: Optional[int] = None,
-    ordernar_por: str = Query("data", description="Campos: data, horario_inicial, id, responsavel"),
+    ordenar_por: str = Query("data", description="Campos: data, horario_inicial, id, responsavel"),
     ordem: str = Query("asc", description="asc ou desc"),
 ):
     conn = get_conn()
@@ -170,6 +190,7 @@ def listar_reservas(
 
     rows = conn.execute(query, params).fetchall()
     conn.close()
+    logger.info("Listagem de reservas: %d encontradas", len(rows))
     return [reserva_para_dict(r) for r in rows]
 
 
@@ -179,16 +200,21 @@ def buscar_reserva(reserva_id: int):
     row = conn.execute("SELECT * FROM reservas WHERE id = ?", (reserva_id,)).fetchone()
     conn.close()
     if row is None:
+        logger.warning("Reserva não encontrada: id=%s", reserva_id)
         raise HTTPException(404, "Reserva não encontrada")
     return reserva_para_dict(row)
 
 
 @app.put("/reservas/{reserva_id}")
-def atualizar_reserva(reserva_id: int, dados: ReservaEntrada):
+def atualizar_reserva(reserva_id: int, dados: ReservaEntrada, x_api_key: str = Header(...)):
+    if x_api_key != CHAVE_API:
+        raise HTTPException(401, "Não autorizado")
+    
     conn = get_conn()
     existente = conn.execute("SELECT * FROM reservas WHERE id = ?", (reserva_id,)).fetchone()
     if existente is None:
         conn.close()
+        logger.warning("Tentativa de atualizar reserva inexistente: id=%s", reserva_id)
         raise HTTPException(404, "Reserva não encontrada")
 
     if not sala_existe(conn, dados.sala_id):
@@ -197,6 +223,7 @@ def atualizar_reserva(reserva_id: int, dados: ReservaEntrada):
 
     if existe_conflito(conn, dados.sala_id, dados.data, dados.horario_inicial, dados.horario_final, ignorar_id=reserva_id):
         conn.close()
+        logger.warning("Conflito de horário ao atualizar reserva id=%s", reserva_id)
         raise HTTPException(409, "Já existe uma reserva para esta sala neste horário")
 
     conn.execute(
@@ -208,16 +235,22 @@ def atualizar_reserva(reserva_id: int, dados: ReservaEntrada):
     conn.commit()
     atualizada = conn.execute("SELECT * FROM reservas WHERE id = ?", (reserva_id,)).fetchone()
     conn.close()
+    logger.info("Reserva atualizada: id=%s", reserva_id)
     return reserva_para_dict(atualizada)
 
 
 @app.delete("/reservas/{reserva_id}", status_code=204)
-def excluir_reserva(reserva_id: int):
+def excluir_reserva(reserva_id: int, x_api_key: str = Header(...)):
+    if x_api_key != CHAVE_API:
+        raise HTTPException(401, "Não autorizado")
+    
     conn = get_conn()
     existente = conn.execute("SELECT * FROM reservas WHERE id = ?", (reserva_id,)).fetchone()
     if existente is None:
         conn.close()
+        logger.warning("Tentativa de excluir reserva inexistente: id=%s", reserva_id)
         raise HTTPException(404, "Reserva não encontrada")
     conn.execute("DELETE FROM reservas WHERE id = ?", (reserva_id,))
     conn.commit()
     conn.close()
+    logger.info("Reserva excluída: id=%s", reserva_id)
